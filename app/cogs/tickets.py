@@ -22,7 +22,7 @@ async def get_admin_role_ids(guild_id: int) -> list[int]:
 
 
 def member_is_admin(member: discord.Member, admin_role_ids: list[int]) -> bool:
-    if member.guild_permissions.manage_guild:
+    if member.guild_permissions.administrator:
         return True
     return any(role.id in admin_role_ids for role in member.roles)
 
@@ -154,7 +154,7 @@ class TicketsCog(commands.Cog):
 
     @app_commands.command(name="界面", description="建立一個用於開立票券的面板")
     @app_commands.guild_only()
-    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.default_permissions(administrator=True)
     async def panel(self, i: Interaction) -> None:
         await i.response.send_modal(PanelSetupModal())
 
