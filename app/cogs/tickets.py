@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 import discord
 from discord import app_commands
 from discord.ext import commands
+from loguru import logger
 
 from app import ui
 from app.core.embeds import DefaultEmbed, ErrorEmbed
@@ -55,19 +56,49 @@ async def create_ticket(i: Interaction) -> None:
         if role is not None:
             overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
 
-    ticket_channel = await guild.create_text_channel(
-        name=f"票券-{member.name}",
-        category=category,
-        overwrites=overwrites,
-        reason=f"Ticket created by {member} ({member.id})",
-    )
+    try:
+        ticket_channel = await guild.create_text_channel(
+            name=f"票券-{member.name}",
+            category=category,
+            overwrites=overwrites,
+            reason=f"Ticket created by {member} ({member.id})",
+        )
+    except discord.Forbidden:
+        await i.edit_original_response(
+            embed=ErrorEmbed(
+                title="無法建立票券",
+                description=(
+                    "機器人缺少「管理頻道」權限，無法建立票券頻道。\n"
+                    "請到伺服器設定中授予機器人「管理頻道」權限後再試一次。"
+                ),
+            )
+        )
+        return
+    except discord.HTTPException:
+        logger.exception(f"Failed to create ticket channel in guild {guild.id}")
+        await i.edit_original_response(
+            embed=ErrorEmbed(
+                title="無法建立票券",
+                description=(
+                    "建立票券頻道時發生錯誤。\n"
+                    "可能是此分類的頻道數已達上限（50 個）或伺服器頻道總數已達上限（500 個），"
+                    "請整理後再試一次。"
+                ),
+            )
+        )
+        return
+
     await Ticket.create(channel_id=ticket_channel.id, guild_id=guild.id, creator_id=member.id)
 
     welcome = DefaultEmbed(
         title="票券已建立",
         description="管理員可使用 `/結單` 來關閉此票券，或使用 `/歸檔` 來歸檔此票券（建立者將無法再檢視此頻道）",
     )
-    await ticket_channel.send(content=member.mention, embed=welcome)
+    try:
+        await ticket_channel.send(content=member.mention, embed=welcome)
+    except discord.HTTPException:
+        logger.exception(f"Failed to send welcome message in ticket channel {ticket_channel.id}")
+
     await i.edit_original_response(
         embed=DefaultEmbed(title="完成", description=f"已為你建立票券：{ticket_channel.mention}")
     )
@@ -125,7 +156,23 @@ class PanelSetupModal(ui.Modal):
             title=self.panel_title.component.value,
             description=self.panel_description.component.value,
         )
-        await i.channel.send(embed=embed, view=TicketPanelView(self.button_label.component.value))
+        try:
+            await i.channel.send(
+                embed=embed, view=TicketPanelView(self.button_label.component.value)
+            )
+        except discord.Forbidden:
+            await i.response.send_message(
+                embed=ErrorEmbed(
+                    title="無法建立面板",
+                    description=(
+                        "機器人無法在此頻道傳送訊息。\n"
+                        "請確認機器人擁有此頻道的「檢視頻道」、「傳送訊息」與「嵌入連結」"
+                        "權限後再試一次。"
+                    ),
+                ),
+                ephemeral=True,
+            )
+            return
         await i.response.send_message(
             embed=DefaultEmbed(title="完成", description="票券面板已建立。"), ephemeral=True
         )
@@ -176,9 +223,22 @@ class TicketsCog(commands.Cog):
             embed=DefaultEmbed(title="結單", description="此票券即將關閉。")
         )
         await asyncio.sleep(3)
-        await ticket.delete()
         if isinstance(i.channel, discord.TextChannel):
-            await i.channel.delete(reason=f"Ticket closed by {i.user}")
+            try:
+                await i.channel.delete(reason=f"Ticket closed by {i.user}")
+            except discord.Forbidden:
+                await i.followup.send(
+                    embed=ErrorEmbed(
+                        title="無法結單",
+                        description=(
+                            "機器人缺少「管理頻道」權限，無法刪除此頻道。\n"
+                            "請到伺服器設定中授予機器人「管理頻道」權限後再試一次。"
+                        ),
+                    ),
+                    ephemeral=True,
+                )
+                return
+        await ticket.delete()
 
     @app_commands.command(name="歸檔", description="歸檔此票券（建立者將無法再檢視此頻道）")
     @app_commands.guild_only()
@@ -199,9 +259,23 @@ class TicketsCog(commands.Cog):
         if isinstance(i.channel, discord.TextChannel):
             creator = i.guild.get_member(ticket.creator_id)
             if creator is not None:
-                await i.channel.set_permissions(
-                    creator, view_channel=False, reason=f"Ticket archived by {i.user}"
-                )
+                try:
+                    await i.channel.set_permissions(
+                        creator, view_channel=False, reason=f"Ticket archived by {i.user}"
+                    )
+                except discord.Forbidden:
+                    await i.response.send_message(
+                        embed=ErrorEmbed(
+                            title="無法歸檔",
+                            description=(
+                                "機器人缺少「管理身分組」權限，無法修改此頻道的權限。\n"
+                                "請到伺服器設定中授予機器人「管理身分組」權限，並確認其身分組"
+                                "順序高於票券建立者後再試一次。"
+                            ),
+                        ),
+                        ephemeral=True,
+                    )
+                    return
 
         ticket.archived = True
         await ticket.save()
